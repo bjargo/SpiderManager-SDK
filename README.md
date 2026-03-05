@@ -12,7 +12,7 @@
 ## 安装
 
 ```bash
-pip install -e .
+pip install spidermanager-sdk
 ```
 
 ## 快速开始
