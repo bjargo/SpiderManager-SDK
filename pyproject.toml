@@ -27,3 +27,5 @@ where = ["src"]
 
 [tool.setuptools_scm]
 version_file = "src/spidermanager_sdk/_version.py"
+# 强制不显示 +xxx 这种本地版本后缀，确保符合 PyPI 标准
+local_scheme = "no-local-version"
