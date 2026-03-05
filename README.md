@@ -45,6 +45,30 @@ sdk.flush()
 | `buffer_size` | — | `20` | 缓冲条数阈值 |
 | `flush_interval` | — | `3.0` | 时间窗口（秒） |
 
+## 异步 API (Asyncio)
+
+由于爬虫开发经常使用 `httpx`, `aiohttp`, `Playwright` 等异步工具，SDK 也提供了原生的 Async 接口。
+推荐使用 `async with` 上下文管理器，离开上下文时将自动触发 flush。
+
+```python
+import asyncio
+from spidermanager_sdk.aio import async_sdk
+
+async def main():
+    # 自动读取环境变量并初始化，退出时自动 flush
+    async with async_sdk:
+        await async_sdk.insert("articles", {"title": "Async Data", "url": "https://a.com"})
+        
+        # 批量插入
+        await async_sdk.insert("articles", [
+            {"title": "B", "url": "https://b.com"},
+            {"title": "C", "url": "https://c.com"},
+        ])
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
 ## 架构
 
 ```
