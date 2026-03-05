@@ -17,7 +17,7 @@ import httpx
 logger = logging.getLogger("spidermanager_sdk.transport")
 
 # 上报接口固定路径
-_INGEST_PATH: str = "/api/v1/tasks/data/ingest"
+_INGEST_PATH: str = "/api/tasks/data/ingest"
 
 # 默认超时配置（连接 / 读取 / 写入 / 总计）
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=30.0)

@@ -78,5 +78,5 @@ FlushBuffer (内存缓冲, 线程安全)
     ↓  条数阈值 / 定时器触发
 HttpTransport.send_batch()
     ↓
-POST /api/v1/tasks/data/ingest?task_id=xxx
+POST /api/tasks/data/ingest?task_id=xxx
 ```
