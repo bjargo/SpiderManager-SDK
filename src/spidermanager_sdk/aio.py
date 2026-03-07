@@ -17,7 +17,7 @@ import httpx
 
 from spidermanager_sdk.buffer import BufferEntry
 from spidermanager_sdk.client import _DEFAULT_BUFFER_SIZE, _DEFAULT_FLUSH_INTERVAL
-from spidermanager_sdk.transport import _INGEST_PATH, _DEFAULT_TIMEOUT
+from spidermanager_sdk.transport import _INGEST_PATH, _DEFAULT_TIMEOUT, _DEFAULT_LIMITS
 
 logger = logging.getLogger("spidermanager_sdk.aio")
 
@@ -25,15 +25,21 @@ logger = logging.getLogger("spidermanager_sdk.aio")
 class AsyncHttpTransport:
     api_url: str = ""
     task_id: str = ""
+    host_header: str | None = None
     _client: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
 
     async def open(self) -> None:
         if self._client is not None:
             return
+        headers = {"Content-Type": "application/json"}
+        if self.host_header:
+            headers["Host"] = self.host_header
+
         self._client = httpx.AsyncClient(
             base_url=self.api_url,
             timeout=_DEFAULT_TIMEOUT,
-            headers={"Content-Type": "application/json"},
+            limits=_DEFAULT_LIMITS,
+            headers=headers,
         )
 
     async def close(self) -> None:
@@ -100,6 +106,14 @@ class AsyncFlushBuffer:
         if current_size >= self.max_size:
             await self.flush()
 
+    async def rollback(self, entries: list[BufferEntry]) -> None:
+        """
+        异步回滚：将失败数据写回缓冲区头部。
+        """
+        async with self._lock:
+            self._entries = entries + self._entries
+            logger.debug("已异步回滚 %d 条数据至缓冲区", len(entries))
+
     async def flush(self) -> None:
         async with self._lock:
             if not self._entries:
@@ -129,6 +143,7 @@ class AsyncSpiderManagerClient:
     def __init__(self) -> None:
         self._api_url: str = ""
         self._task_id: str = ""
+        self._host_header: str | None = None
         self._initialized: bool = False
         self._transport: AsyncHttpTransport | None = None
         self._buffer: AsyncFlushBuffer | None = None
@@ -138,16 +153,26 @@ class AsyncSpiderManagerClient:
         api_url: str | None = None,
         task_id: str | None = None,
         *,
-        buffer_size: int = _DEFAULT_BUFFER_SIZE,
+        buffer_size: int = 50,
         flush_interval: float = _DEFAULT_FLUSH_INTERVAL,
+        resolve_dns: bool = True,
     ) -> None:
-        self._api_url = api_url or os.environ.get("SPIDER_API_URL", "")
-        self._task_id = task_id or os.environ.get("TASK_ID", "")
+        self._api_url = (api_url or os.environ.get("SPIDER_API_URL", "")).strip()
+        self._task_id = (task_id or os.environ.get("TASK_ID", "")).strip()
         if not self._api_url or not self._task_id:
             raise ValueError("api_url 或 task_id 未配置 (或环境变量缺失)")
         self._api_url = self._api_url.rstrip("/")
 
-        self._transport = AsyncHttpTransport(api_url=self._api_url, task_id=self._task_id)
+        # ── 1.5 DNS 预解析 ──
+        if resolve_dns:
+            from spidermanager_sdk.utils import resolve_provider_url
+            self._api_url, self._host_header = resolve_provider_url(self._api_url)
+
+        self._transport = AsyncHttpTransport(
+            api_url=self._api_url, 
+            task_id=self._task_id,
+            host_header=self._host_header
+        )
         await self._transport.open()
 
         self._buffer = AsyncFlushBuffer(
@@ -206,8 +231,22 @@ class AsyncSpiderManagerClient:
         for table_name, records in grouped.items():
             tasks.append(self._transport.send_batch(table_name, records))
         
-        if tasks:
-            await asyncio.gather(*tasks)
+        if not tasks:
+            return
+
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in results:
+                if res is not True:
+                    # 发生异常或返回 False，触发回退
+                    logger.warning("异步上报部分表失败，触发回退")
+                    if self._buffer:
+                        await self._buffer.rollback(entries)
+                    break
+        except Exception:
+            logger.exception("异步上报发生未知异常，触发回退")
+            if self._buffer:
+                await self._buffer.rollback(entries)
 
 # 默认全局异步单例
 async_sdk = AsyncSpiderManagerClient()

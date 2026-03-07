@@ -22,6 +22,9 @@ _INGEST_PATH: str = "/api/tasks/data/ingest"
 # 默认超时配置（连接 / 读取 / 写入 / 总计）
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=30.0)
 
+# 默认连接池限制：增加保活连接数，减少高频上报下的 DNS 解析压力
+_DEFAULT_LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=20)
+
 
 @dataclass
 class HttpTransport:
@@ -37,6 +40,7 @@ class HttpTransport:
     """
     api_url: str = ""
     task_id: str = ""
+    host_header: str | None = None
 
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
 
@@ -48,10 +52,15 @@ class HttpTransport:
         """初始化底层 httpx 连接池。"""
         if self._client is not None:
             return
+        headers = {"Content-Type": "application/json"}
+        if self.host_header:
+            headers["Host"] = self.host_header
+
         self._client = httpx.Client(
             base_url=self.api_url,
             timeout=_DEFAULT_TIMEOUT,
-            headers={"Content-Type": "application/json"},
+            limits=_DEFAULT_LIMITS,
+            headers=headers,
         )
         logger.debug("HTTP transport opened → %s", self.api_url)
 

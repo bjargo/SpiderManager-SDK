@@ -38,7 +38,7 @@ class FlushBuffer:
     on_flush : Callable[[list[BufferEntry]], None]
         实际的 flush 回调，由 Client 层注入。
     """
-    max_size: int = 20
+    max_size: int = 50
     flush_interval: float = 3.0
     on_flush: Callable[[list[BufferEntry]], None] | None = None
 
@@ -76,6 +76,15 @@ class FlushBuffer:
 
         if current_size >= self.max_size:
             self.flush()
+
+    def rollback(self, entries: list[BufferEntry]) -> None:
+        """
+        将上报失败的数据重新写回缓冲区头部，等待下次 flush。
+        """
+        with self._lock:
+            # 将失败的数据插到现有数据之前
+            self._entries = entries + self._entries
+            logger.debug("已回滚 %d 条数据至缓冲区", len(entries))
 
     def flush(self) -> None:
         """

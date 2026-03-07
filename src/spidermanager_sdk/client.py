@@ -45,6 +45,7 @@ class SpiderManagerClient:
     def __init__(self) -> None:
         self._api_url: str = ""
         self._task_id: str = ""
+        self._host_header: str | None = None
         self._initialized: bool = False
         self._transport: HttpTransport | None = None
         self._buffer: FlushBuffer | None = None
@@ -59,8 +60,9 @@ class SpiderManagerClient:
         api_url: str | None = None,
         task_id: str | None = None,
         *,
-        buffer_size: int = _DEFAULT_BUFFER_SIZE,
+        buffer_size: int = 50,
         flush_interval: float = _DEFAULT_FLUSH_INTERVAL,
+        resolve_dns: bool = True,
     ) -> None:
         """
         初始化 SDK。
@@ -77,8 +79,8 @@ class SpiderManagerClient:
             时间窗口（秒），默认 3.0。
         """
         # ── 1. 解析配置 ──
-        self._api_url = api_url or os.environ.get("SPIDER_API_URL", "")
-        self._task_id = task_id or os.environ.get("TASK_ID", "")
+        self._api_url = (api_url or os.environ.get("SPIDER_API_URL", "")).strip()
+        self._task_id = (task_id or os.environ.get("TASK_ID", "")).strip()
 
         if not self._api_url:
             raise ValueError(
@@ -94,8 +96,17 @@ class SpiderManagerClient:
         # 去除尾部斜杠
         self._api_url = self._api_url.rstrip("/")
 
+        # ── 1.5 DNS 预解析 ──
+        if resolve_dns:
+            from spidermanager_sdk.utils import resolve_provider_url
+            self._api_url, self._host_header = resolve_provider_url(self._api_url)
+
         # ── 2. 初始化传输层 ──
-        self._transport = HttpTransport(api_url=self._api_url, task_id=self._task_id)
+        self._transport = HttpTransport(
+            api_url=self._api_url, 
+            task_id=self._task_id,
+            host_header=self._host_header
+        )
         self._transport.open()
 
         # ── 3. 初始化缓冲区 ──
@@ -148,11 +159,21 @@ class SpiderManagerClient:
 
     def shutdown(self) -> None:
         """
-        优雅关闭 SDK：停止定时器 → flush 剩余数据 → 关闭 HTTP 连接。
+        优雅关闭 SDK：停止定时器 → 多轮强行 flush → 关闭连接。
         """
         logger.info("SDK 正在关闭...")
         if self._buffer:
             self._buffer.stop()
+            
+            # “夺命连环报”：如果停止后还有残留（由于 rollback 可能导致残留），再尝试最后一搏
+            # 这对处理 atexit 时的重试很有用
+            for attempt in range(3):
+                if self._buffer.pending_count > 0:
+                    logger.info("正在执行进程退出前的最后一轮数据冲刷 (Round %d)...", attempt + 1)
+                    self._buffer.flush()
+                else:
+                    break
+
         if self._transport:
             self._transport.close()
         self._initialized = False
@@ -194,11 +215,16 @@ class SpiderManagerClient:
             grouped[entry.table_name].append(entry.data)
 
         for table_name, records in grouped.items():
-            success = self._transport.send_batch(table_name, records)
-            if not success:
-                logger.error(
-                    "表 '%s' 的 %d 条数据上报失败", table_name, len(records),
-                )
+            try:
+                success = self._transport.send_batch(table_name, records)
+                if not success:
+                    logger.error("表 '%s' 上报失败，触发回退", table_name)
+                    self._buffer.rollback(entries)
+                    break
+            except Exception:
+                logger.exception("上报过程发生异常，触发回退")
+                self._buffer.rollback(entries)
+                break
 
     def _register_exit_hooks(self) -> None:
         """
